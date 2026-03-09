@@ -1,0 +1,62 @@
+name: Sync Skills to Supabase
+
+# Runs weekly (Sunday 2am UTC) + on any push to skills/ on main + manual trigger
+on:
+  schedule:
+    - cron: '0 2 * * 0' # Every Sunday at 2am UTC
+  push:
+    branches: [main]
+    paths:
+      - 'skills/**'
+  workflow_dispatch: # Manual trigger from GitHub UI
+
+jobs:
+  sync-to-supabase:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Full history for change detection
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check for skill changes (scheduled runs only)
+        if: github.event_name == 'schedule'
+        id: changes
+        run: |
+          # Compare HEAD with the last sync timestamp
+          # If VERSIONS.md changed in the last 7 days, we have updates
+          LAST_WEEK=$(date -d '7 days ago' +%Y-%m-%dT%H:%M:%S)
+          CHANGED=$(git log --since="$LAST_WEEK" --name-only --pretty=format: -- skills/ | sort -u | grep -c '.' || true)
+          echo "skills_changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          if [ "$CHANGED" -gt 0 ]; then
+            echo "🔄 $CHANGED skill files changed in the last week"
+          else
+            echo "✅ No skill changes detected — skipping sync"
+          fi
+
+      - name: Sync skills to Supabase
+        if: >
+          github.event_name != 'schedule' ||
+          steps.changes.outputs.skills_changed > 0
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+        run: node tools/clis/sync-skills.js sync
+
+      - name: Report status
+        if: always()
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "${{ steps.changes.outputs.skills_changed }}" = "0" ]; then
+            echo "⏭️ Scheduled run skipped — no changes"
+          else
+            echo "✅ Skills synced to Supabase knowledge base"
+          fi
